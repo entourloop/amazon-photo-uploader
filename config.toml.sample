@@ -1,0 +1,8 @@
+country = "fr"
+zone = "eu"
+user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15"
+session_id = "000-1111111-2222222"
+cookie_x_acb = "dNN@SOMETHING"
+cookie_at_acb = "Atza|SOMETHING"
+cookie_ubid_acb = "333-4444444-5555555"
+cookie_x_amz_access_token = "Atza|SOMETHING"
