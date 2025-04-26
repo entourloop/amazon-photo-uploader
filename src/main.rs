@@ -7,7 +7,7 @@ use config::Config;
 use clap::Parser;
 use env_logger::{Builder, Target};
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, info};
+use log::{debug, error, info};
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
@@ -130,7 +130,14 @@ async fn main() -> Result<(), io::Error> {
         let path = dir_entry.path();
 
         // Check for prior processing
-        let attr = fs::metadata(path).unwrap();
+        let attr = match fs::metadata(path) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Cannot open {} ({}), skipping ", path.to_string_lossy(), e.kind());
+                progress_bar.inc(1);
+                continue;
+            }
+        };
         let mut contents_vec: Vec<u8> = Vec::with_capacity(attr.len() as usize);
         // Now get contents
         let mut file = File::open(path).unwrap();
@@ -162,10 +169,7 @@ async fn main() -> Result<(), io::Error> {
                 catalog.insert(md5sum_str, val);
             }
             Err(conn_err) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("{:?}", conn_err),
-                ));
+                error!("Photo not uploaded ({}), skipped", conn_err);
             }
         }
         progress_bar.inc(1);

@@ -1,8 +1,5 @@
 use std::{
-    fs::{self, File},
-    io::{BufReader, Read},
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    fs::{self, File}, io::{BufReader, Read}, path::Path, process::exit, time::{SystemTime, UNIX_EPOCH}
 };
 
 use chrono::{DateTime, Utc};
@@ -590,7 +587,7 @@ impl AmznPhoto {
     }
 
     /// Upload a picture and return its ID
-    pub async fn upload_picture(&mut self, pic_path: &Path) -> Result<String, reqwest::Error> {
+    pub async fn upload_picture(&mut self, pic_path: &Path) -> Result<String, String> {
         if self.web_dir_node.is_none() && !self.dry_run {
             self.update_web_pictures_dir_node().await;
         }
@@ -600,7 +597,10 @@ impl AmznPhoto {
         let file = File::open(pic_path).unwrap();
         let mut contents = BufReader::new(file);
         let exif_reader = exif::Reader::new();
-        let exif_data = exif_reader.read_from_container(&mut contents).unwrap();
+        let exif_data = match exif_reader.read_from_container(&mut contents) {
+            Ok(v) => v,
+            Err(e) => return Err(e.to_string()),
+        };
         let capture_date: exif::DateTime;
         if let Some(field) = exif_data.get_field(Tag::DateTimeDigitized, exif::In::PRIMARY) {
             match field.value {
@@ -622,6 +622,7 @@ impl AmznPhoto {
             capture_date.second,
             capture_date.nanosecond.or_else(|| Some(0)).unwrap()
         );
+        // debug!("Capture date is {}", capture_date_str);
         let mut contents_vec: Vec<u8> = Vec::with_capacity(attr.len() as usize);
         // Now get contents
         let mut file = File::open(pic_path).unwrap();
@@ -681,17 +682,23 @@ impl AmznPhoto {
         }
 
         // Submit the POST request
-        let response = self
+        let response = match self
             .client
             .post(url)
             .headers(headers)
             .body(contents_vec)
             .send()
-            .await?;
+            .await {
+                Ok(v) => v,
+                Err(e) => return Err(e.to_string()),
+            };
 
         // Check the HTTP status
         if response.status().is_success() {
-            let body = response.json::<ResponseUpload>().await?;
+            let body = match response.json::<ResponseUpload>().await {
+                Ok(v) => v,
+                Err(e) => return Err(e.to_string()),
+            };
             Ok(body.id)
         } else {
             let status_code = response.status().as_u16();
@@ -702,7 +709,10 @@ impl AmznPhoto {
                     // let body = response.text().await?;
                     // debug!("{:?}", body);
                     // panic!();
-                    let body = response.json::<ResponseUploadFail>().await?;
+                    let body = match response.json::<ResponseUploadFail>().await {
+                        Ok(v) => v,
+                        Err(e) => return Err(e.to_string()),
+                    };
                     Ok(body
                         .error_details
                         .conflict_node_ids
@@ -711,7 +721,10 @@ impl AmznPhoto {
                         .to_string())
                 }
                 _ => {
-                    let body = response.text().await?;
+                    let body = match response.text().await {
+                        Ok(v) => v,
+                        Err(e) => return Err(e.to_string()),
+                    };
                     debug!("{:?}", body);
                     panic!();
                     // debug!("Request failed with status: {}", status_code);
