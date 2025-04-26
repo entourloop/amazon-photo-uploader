@@ -42,7 +42,7 @@ struct ResponseAccessToken {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ResponseEmpty {}
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ResponseMatch {
     count: u32,
     r#match: String,
@@ -123,6 +123,17 @@ pub struct ResponseSearchData {
     x_accnt_parent_map: ResponseEmpty,
     #[serde(rename(deserialize = "xAccntParents"))]
     x_accnt_parents: Vec<String>,
+}
+
+impl ResponseSearchData {
+    pub fn empty() -> ResponseSearchData {
+        let empty_vec: Vec<String> = Vec::new();
+            let empty_str: String = "".to_string();
+            let empty_chrono: chrono::DateTime<Utc> = chrono::DateTime::<Utc>::from_timestamp_nanos(0);
+            let empty_resp = ResponseEmpty{};
+            let empty_coll_props = ResponseCollectionProperties{..Default::default()};
+            return ResponseSearchData { access_rule_ids: empty_vec.clone(), child_asset_type_info: empty_vec.clone(), collection_properties: empty_coll_props, created_by: empty_str.clone(), created_date: empty_chrono, e_tag_response: empty_str.clone(), group_permissions: empty_vec.clone(), id: empty_str.clone(), is_root: false, is_shared: false, keywords: empty_vec.clone(), kind: empty_str.clone(), labels: empty_vec.clone(), modified_date: empty_chrono, name: empty_str.clone(), owner_id: empty_str.clone(), parent_map: empty_resp.clone(), parents: empty_vec.clone(), protected_folder: false, restricted: false, status: empty_str.clone(), sub_kinds: empty_vec.clone(), transforms: empty_vec.clone(), version: 0, x_accnt_parent_map: empty_resp.clone(), x_accnt_parents: empty_vec.clone() };
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -229,14 +240,16 @@ pub struct AmznPhoto {
     conf: Config,
     web_dir_node: Option<ResponseSearchData>,
     client: Client,
+    dry_run: bool,
 }
 
 impl AmznPhoto {
-    pub fn new(conf: &Config) -> Self {
+    pub fn new(conf: &Config, dry_run: bool) -> Self {
         Self {
             conf: conf.clone(),
             web_dir_node: None,
             client: Client::new(),
+            dry_run: dry_run,
         }
     }
 
@@ -283,6 +296,12 @@ impl AmznPhoto {
             .unwrap(),
         );
         headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
+
+        // Stop early
+        if self.dry_run {
+            debug!("Dry-run, give back fake data");
+            return Ok("");
+        }
 
         // Submit the GET request
         let response = self
@@ -348,6 +367,12 @@ impl AmznPhoto {
             resource_version: "V2".to_string(),
             content_type: "JSON".to_string(),
         };
+
+        // Return early
+        if self.dry_run {
+            debug!("Dry-run, return fake data");
+            return Ok(ResponseSearchData::empty());
+        }
 
         // Submit the POST request
         let response = self
@@ -418,6 +443,15 @@ impl AmznPhoto {
         );
         headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
 
+        // Return early
+        if self.dry_run {
+            debug!("Dry run, return fake data");
+            let empty_vec_str: Vec<String> = Vec::new();
+            let empty_vec_respmatch: Vec<ResponseMatch> = Vec::new();
+            let empty_vec_respdata: Vec<ResponseSearchData> = Vec::new();
+            return Ok(ResponseSearch{count: 0, aggregations: ResponseAggregations{all_people: empty_vec_str.clone(), cluster_id: empty_vec_str.clone(), favorite: empty_vec_str.clone(), location: empty_vec_str.clone(), people: empty_vec_str.clone(), things: empty_vec_str.clone(), time: empty_vec_respmatch.clone(), r#type: empty_vec_respmatch.clone()}, data: empty_vec_respdata, node_to_search_score_map: ResponseEmpty{}});
+        }
+
         // Submit the GET request
         let response = self.client.get(url).headers(headers).send().await?;
 
@@ -434,7 +468,13 @@ impl AmznPhoto {
 
     async fn find_root_node(&self) -> ResponseSearchData {
         match self.find_nodes("isRoot:true").await {
-            Ok(n) => n.data.first().unwrap().clone(),
+            Ok(n) => {
+                if n.data.len() < 1 {
+                    error!("No nodes!");
+                    return ResponseSearchData::empty();
+                }
+                n.data.first().unwrap().clone()
+            },
             Err(e) => {
                 error!("Error {:?}", e);
                 panic!("{:?}", e);
@@ -523,6 +563,12 @@ impl AmznPhoto {
         );
         headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
 
+        // Return early
+        if self.dry_run {
+            let respdata: Vec<ResponseSearchData> = Vec::new();
+            return Ok(ResponseNodes{ count: 0, data: respdata });
+        }
+
         // Submit the POST request
         let response = self
             .client
@@ -545,7 +591,7 @@ impl AmznPhoto {
 
     /// Upload a picture and return its ID
     pub async fn upload_picture(&mut self, pic_path: &Path) -> Result<String, reqwest::Error> {
-        if self.web_dir_node.is_none() {
+        if self.web_dir_node.is_none() && !self.dry_run {
             self.update_web_pictures_dir_node().await;
         }
 
@@ -583,13 +629,18 @@ impl AmznPhoto {
         // Finally, get hash
         let md5sum = md5::compute(&contents_vec);
 
+        let parent_node = match self.dry_run {
+            false => &self.web_dir_node.as_ref().unwrap().id,
+            true => "NONE"
+        };
+
         let url = Url::parse(
             format!(
                 "https://content-{}.drive.amazonaws.com/v2/upload?conflictResolution=RENAME&fileSize={}&name={}&parentNodeId={}&contentDate={}",
                 self.conf.zone,
                 &attr.len().to_string(),
                 pic_path.file_name().unwrap().to_str().unwrap(),
-                &self.web_dir_node.as_ref().unwrap().id,
+                parent_node,
                 &capture_date_str
             )
             .as_str(),
@@ -623,6 +674,11 @@ impl AmznPhoto {
             .unwrap(),
         );
         headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
+
+        // Return early
+        if self.dry_run {
+            return Ok("".to_string());
+        }
 
         // Submit the POST request
         let response = self
@@ -712,6 +768,11 @@ impl AmznPhoto {
             resource_version: "V2".to_string(),
             content_type: "JSON".to_string(),
         };
+
+        // Return early
+        if self.dry_run {
+            return Ok(());
+        }
 
         // Submit the PATCH request
         let response = self

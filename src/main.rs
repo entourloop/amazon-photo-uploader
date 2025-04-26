@@ -30,6 +30,10 @@ struct Args {
     /// Enable verbose mode
     #[arg(short, long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
+
+    /// Test that it works without actually running any network operation
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    dry_run: bool,
 }
 
 #[tokio::main]
@@ -64,7 +68,7 @@ async fn main() -> Result<(), io::Error> {
     builder.init();
 
     let mut conf = Config::load()?;
-    let mut uploader = AmznPhoto::new(&mut conf);
+    let mut uploader = AmznPhoto::new(&mut conf, args.dry_run);
     let upload_album_id: String;
     let upload_album_owner_id: String;
     let mut uploaded_ids: Vec<String> = Vec::new();
