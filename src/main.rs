@@ -11,8 +11,7 @@ use log::{debug, error, info};
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, BufWriter, Read, Write},
-    path::Path,
+    io::{self, BufRead, BufReader, BufWriter, Read, Write}, path::Path,
 };
 use walkdir::WalkDir;
 
@@ -21,7 +20,7 @@ use walkdir::WalkDir;
 struct Args {
     /// The global album name to use for the upload
     #[arg(long)]
-    album_name: String,
+    album_name: Option<String>,
 
     /// The input directory to process
     #[arg(long)]
@@ -69,23 +68,51 @@ async fn main() -> Result<(), io::Error> {
 
     let mut conf = Config::load()?;
     let mut uploader = AmznPhoto::new(&mut conf, args.dry_run);
-    let upload_album_id: String;
-    let upload_album_owner_id: String;
-    let mut uploaded_ids: Vec<String> = Vec::new();
-    let album_ref = &uploader.get_album(&args.album_name).await;
+    let is_albumless: bool = args.album_name.is_none();
 
-    info!("Getting the album reference...");
-    match album_ref {
-        Ok(c) => {
-            debug!("Album {} has ID {}", c.name, c.id);
-            upload_album_id = c.id.clone();
-            upload_album_owner_id = c.owner_id.clone();
+    if is_albumless {
+        let mut input = String::new();
+        loop {
+            print!("Do you really want to upload without adding to a specific album? [y/N]: ");
+            let _ = io::stdout().flush();
+            io::stdin().read_line(&mut input).unwrap();
+            if matches!(input.trim().to_lowercase().as_str(), "y" | "yes" | "n" | "no" | "") {
+                break;
+            }
         }
-        Err(e) => {
-            debug!("Err {:?}", e);
-            return Err(io::Error::new(io::ErrorKind::Other, format!("{:?}", e)));
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => {
+                // Don't do anything yet
+            },
+            "n" | "no" | "" => {
+                return Ok(());
+            },
+            _ => { return Ok(());}
         }
-    };
+    }
+
+    let mut uploaded_ids: Vec<String> = Vec::new();
+    let mut upload_album_id: String = "".to_string();
+    let mut upload_album_owner_id: String = "".to_string();
+
+    if is_albumless {
+
+    } else {
+        let album_ref = &uploader.get_album(&args.album_name.unwrap()).await;
+
+        info!("Getting the album reference...");
+        match album_ref {
+            Ok(c) => {
+                debug!("Album {} has ID {}", c.name, c.id);
+                upload_album_id = c.id.clone();
+                upload_album_owner_id = c.owner_id.clone();
+            }
+            Err(e) => {
+                debug!("Err {:?}", e);
+                return Err(io::Error::new(io::ErrorKind::Other, format!("{:?}", e)));
+            }
+        };
+    }
 
     // Create an upload logger and read it for prior uploads
     let default_path = Path::new("/tmp/uploader_amazon_photos.log");
@@ -175,34 +202,36 @@ async fn main() -> Result<(), io::Error> {
         progress_bar.inc(1);
     }
     progress_bar.finish_with_message("Done!");
-
-    // Can't add more than 25 items at a single time
-    let max_chunk_size = 25;
-    let ids_chunks_count = match uploaded_ids.len() % max_chunk_size != 0 {
-        true => ((uploaded_ids.len() - (uploaded_ids.len() % max_chunk_size)) / max_chunk_size) + 1,
-        false => uploaded_ids.len() / max_chunk_size,
-    };
     // debug!("Uploaded {:?}", uploaded_ids);
-    info!("Adding uploaded pictures into the album...");
-    let progress_bar = ProgressBar::new(ids_chunks_count as u64);
-    progress_bar
-        .set_style(ProgressStyle::with_template("{bar} {pos:>7}/{len:7} {eta_precise}").unwrap());
-    for ids_batch in uploaded_ids.chunks(max_chunk_size) {
-        let album_add_operation = uploader
-            .add_to_album(upload_album_id.clone(), ids_batch)
-            .await;
-        match album_add_operation {
-            Ok(_) => progress_bar.inc(1),
-            Err(conn_err) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("{:?}", conn_err),
-                ));
-            }
+
+    if !is_albumless {
+        // Can't add more than 25 items at a single time
+        let max_chunk_size = 25;
+        let ids_chunks_count = match uploaded_ids.len() % max_chunk_size != 0 {
+            true => ((uploaded_ids.len() - (uploaded_ids.len() % max_chunk_size)) / max_chunk_size) + 1,
+            false => uploaded_ids.len() / max_chunk_size,
         };
+        info!("Adding uploaded pictures into the album...");
+        let progress_bar = ProgressBar::new(ids_chunks_count as u64);
+        progress_bar
+            .set_style(ProgressStyle::with_template("{bar} {pos:>7}/{len:7} {eta_precise}").unwrap());
+        for ids_batch in uploaded_ids.chunks(max_chunk_size) {
+            let album_add_operation = uploader
+                .add_to_album(upload_album_id.clone(), ids_batch)
+                .await;
+            match album_add_operation {
+                Ok(_) => progress_bar.inc(1),
+                Err(conn_err) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("{:?}", conn_err),
+                    ));
+                }
+            };
+        }
+        progress_bar.finish();
+        info!("Done!");
     }
-    progress_bar.finish();
-    info!("Done!");
 
     let _ = catalog_writer.flush();
 

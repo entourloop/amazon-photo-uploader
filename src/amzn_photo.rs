@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File}, io::{BufReader, Read}, path::Path, process::exit, time::{SystemTime, UNIX_EPOCH}
+    fs::{self, File}, io::{BufReader, Read}, path::Path, time::{SystemTime, UNIX_EPOCH}
 };
 
 use chrono::{DateTime, Utc};
