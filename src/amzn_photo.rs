@@ -258,6 +258,24 @@ impl AmznPhoto {
         since_epoch.as_millis().to_string()
     }
 
+    /// Check if the response is a 401 Unauthorized error and provide helpful message
+    /// Returns true if it was a 401 error (and prints the helpful message)
+    fn check_auth_error(status_code: u16) -> bool {
+        if status_code == 401 {
+            error!("Authentication failed: Your session cookies have expired.");
+            error!("");
+            error!("Please update your cookies using the config_update.py script:");
+            error!("  1. Open Amazon Photos in your web browser and log in");
+            error!("  2. Open Developer Tools (F12)");
+            error!("  3. In the Console tab, run: document.cookie");
+            error!("  4. Copy the entire cookie string");
+            error!("  5. Run: python3 config_update.py 'session-id=...; x-acb...=...; ...'");
+            error!("");
+            return true;
+        }
+        false
+    }
+
     /// Get an auth token valid across all Amazon boundaries - Used for content uploading
     #[allow(dead_code)]
     async fn renew_auth_token(&mut self) -> Result<&str, reqwest::Error> {
@@ -319,7 +337,9 @@ impl AmznPhoto {
             self.conf.cookie_x_amz_access_token = body.access_token;
             Ok(&self.conf.cookie_x_amz_access_token)
         } else {
-            debug!("Request failed with status: {}", response.status());
+            let status_code = response.status().as_u16();
+            debug!("Request failed with status: {}", status_code);
+            Self::check_auth_error(status_code);
             Err(response.error_for_status().err().unwrap())
         }
     }
@@ -385,7 +405,9 @@ impl AmznPhoto {
             let body = response.json::<ResponseSearchData>().await?;
             Ok(body)
         } else {
-            debug!("Request failed with status: {}", response.status());
+            let status_code = response.status().as_u16();
+            debug!("Request failed with status: {}", status_code);
+            Self::check_auth_error(status_code);
             Err(response.error_for_status().err().unwrap())
         }
     }
@@ -458,7 +480,9 @@ impl AmznPhoto {
             debug!("Search response: {:?}", body);
             Ok(body)
         } else {
-            debug!("Request failed with status: {}", response.status());
+            let status_code = response.status().as_u16();
+            debug!("Request failed with status: {}", status_code);
+            Self::check_auth_error(status_code);
             Err(response.error_for_status().err().unwrap())
         }
     }
@@ -581,7 +605,9 @@ impl AmznPhoto {
             debug!("Found nodes: {:?}", body.data);
             Ok(body)
         } else {
-            debug!("Request failed with status: {}", response.status());
+            let status_code = response.status().as_u16();
+            debug!("Request failed with status: {}", status_code);
+            Self::check_auth_error(status_code);
             Err(response.error_for_status().err().unwrap())
         }
     }
@@ -721,6 +747,10 @@ impl AmznPhoto {
                         .to_string())
                 }
                 _ => {
+                    // Check for authentication errors
+                    if Self::check_auth_error(status_code) {
+                        return Err("Authentication failed: Session cookies expired".to_string());
+                    }
                     let body = match response.text().await {
                         Ok(v) => v,
                         Err(e) => return Err(e.to_string()),
@@ -802,6 +832,7 @@ impl AmznPhoto {
         } else {
             let status_code = response.status().as_u16();
             debug!("Request failed with status: {}", status_code);
+            Self::check_auth_error(status_code);
             Err(response.error_for_status().err().unwrap())
         }
     }
