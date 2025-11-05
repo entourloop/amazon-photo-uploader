@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File}, io::{BufReader, Read}, path::Path, time::{SystemTime, UNIX_EPOCH}
+    fs::{self, File}, io::Read, path::Path, time::{SystemTime, UNIX_EPOCH}
 };
 
 use chrono::{DateTime, Utc};
@@ -156,7 +156,8 @@ pub struct ResponseNodes {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ResponseImageProperties {
-    orientation: String,
+    #[serde(default)]
+    orientation: Option<String>,
     #[serde(rename(deserialize = "resolutionUnit"))]
     resolution_unit: String,
     width: u32,
@@ -242,10 +243,19 @@ pub struct AmznPhoto {
 
 impl AmznPhoto {
     pub fn new(conf: &Config, dry_run: bool) -> Self {
+        // Configure client with connection pooling and optimized settings
+        let client = Client::builder()
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
             conf: conf.clone(),
             web_dir_node: None,
-            client: Client::new(),
+            client,
             dry_run: dry_run,
         }
     }
@@ -256,6 +266,36 @@ impl AmznPhoto {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
         since_epoch.as_millis().to_string()
+    }
+
+    /// Build common headers for API requests (cached to avoid rebuilding)
+    fn build_common_headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Type", "application/json".parse().unwrap());
+        headers.insert(
+            "Accept",
+            "application/json, text/javascript, */*; q=0.01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("User-Agent", self.conf.user_agent.parse().unwrap());
+        headers.insert(
+            "Cookie",
+            format!(
+                "session-id={}; x-acb{}={}; at-acb{}={}; ubid-acb{}={}",
+                self.conf.session_id,
+                self.conf.country,
+                self.conf.cookie_x_acb,
+                self.conf.country,
+                self.conf.cookie_at_acb,
+                self.conf.country,
+                self.conf.cookie_ubid_acb
+            )
+            .parse()
+            .unwrap(),
+        );
+        headers.insert("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
+        headers
     }
 
     /// Check if the response is a 401 Unauthorized error and provide helpful message
@@ -353,31 +393,7 @@ impl AmznPhoto {
             Url::parse(format!("https://www.amazon.{}/drive/v1/nodes", self.conf.country).as_str())
                 .expect("Can't parse the create album URL");
 
-        let mut headers = HeaderMap::new();
-        headers.append("Content-Type", "application/json".parse().unwrap());
-        headers.append(
-            "Accept",
-            "application/json, text/javascript, */*; q=0.01"
-                .parse()
-                .unwrap(),
-        );
-        headers.append("User-Agent", self.conf.user_agent.parse().unwrap());
-        headers.append(
-            "Cookie",
-            format!(
-                "session-id={}; x-acb{}={}; at-acb{}={}; ubid-acb{}={}",
-                self.conf.session_id,
-                self.conf.country,
-                self.conf.cookie_x_acb,
-                self.conf.country,
-                self.conf.cookie_at_acb,
-                self.conf.country,
-                self.conf.cookie_ubid_acb
-            )
-            .parse()
-            .unwrap(),
-        );
-        headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
+        let headers = self.build_common_headers();
         let payload = QueryNodeCreateNode {
             kind: "VISUAL_COLLECTION".to_string(),
             name: name.to_string(),
@@ -436,31 +452,7 @@ impl AmznPhoto {
         )
         .expect("Can't parse the search URL");
 
-        let mut headers = HeaderMap::new();
-        headers.append("Content-Type", "application/json".parse().unwrap());
-        headers.append(
-            "Accept",
-            "application/json, text/javascript, */*; q=0.01"
-                .parse()
-                .unwrap(),
-        );
-        headers.append("User-Agent", self.conf.user_agent.parse().unwrap());
-        headers.append(
-            "Cookie",
-            format!(
-                "session-id={}; x-acb{}={}; at-acb{}={}; ubid-acb{}={}",
-                self.conf.session_id,
-                self.conf.country,
-                self.conf.cookie_x_acb,
-                self.conf.country,
-                self.conf.cookie_at_acb,
-                self.conf.country,
-                self.conf.cookie_ubid_acb
-            )
-            .parse()
-            .unwrap(),
-        );
-        headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
+        let headers = self.build_common_headers();
 
         // Return early
         if self.dry_run {
@@ -504,6 +496,8 @@ impl AmznPhoto {
     }
 
     async fn update_web_pictures_dir_node(&mut self) -> ResponseSearchData {
+        // Note: These operations must be sequential because each depends on the previous result
+        // The Pictures directory is needed to find its children (Web directory)
         let root_node = self.find_root_node().await;
         let pictures_dir_searchdata = self
             .find_children_nodes(
@@ -558,31 +552,7 @@ impl AmznPhoto {
         url: Url,
         params: &[(&str, &str)],
     ) -> Result<ResponseNodes, reqwest::Error> {
-        let mut headers = HeaderMap::new();
-        headers.append("Content-Type", "application/json".parse().unwrap());
-        headers.append(
-            "Accept",
-            "application/json, text/javascript, */*; q=0.01"
-                .parse()
-                .unwrap(),
-        );
-        headers.append("User-Agent", self.conf.user_agent.parse().unwrap());
-        headers.append(
-            "Cookie",
-            format!(
-                "session-id={}; x-acb{}={}; at-acb{}={}; ubid-acb{}={}",
-                self.conf.session_id,
-                self.conf.country,
-                self.conf.cookie_x_acb,
-                self.conf.country,
-                self.conf.cookie_at_acb,
-                self.conf.country,
-                self.conf.cookie_ubid_acb
-            )
-            .parse()
-            .unwrap(),
-        );
-        headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
+        let headers = self.build_common_headers();
 
         // Return early
         if self.dry_run {
@@ -613,48 +583,117 @@ impl AmznPhoto {
     }
 
     /// Upload a picture and return its ID
-    pub async fn upload_picture(&mut self, pic_path: &Path) -> Result<String, String> {
+    /// If contents and md5sum are provided, they will be used instead of reading the file again
+    pub async fn upload_picture(&mut self, pic_path: &Path, contents: Option<&[u8]>, md5sum: Option<&str>) -> Result<String, String> {
         if self.web_dir_node.is_none() && !self.dry_run {
             self.update_web_pictures_dir_node().await;
         }
 
-        let attr = fs::metadata(pic_path).unwrap();
-        // Get EXIF data
-        let file = File::open(pic_path).unwrap();
-        let mut contents = BufReader::new(file);
-        let exif_reader = exif::Reader::new();
-        let exif_data = match exif_reader.read_from_container(&mut contents) {
-            Ok(v) => v,
-            Err(e) => return Err(e.to_string()),
-        };
-        let capture_date: exif::DateTime;
-        if let Some(field) = exif_data.get_field(Tag::DateTimeDigitized, exif::In::PRIMARY) {
-            match field.value {
-                Value::Ascii(ref vec) if !vec.is_empty() => {
-                    capture_date = exif::DateTime::from_ascii(&vec[0]).unwrap();
-                }
-                _ => capture_date = exif::DateTime::from_ascii(b"2000:01:01 00:00:00").unwrap(),
-            }
+        // Read file contents if not provided
+        let (contents_vec, md5sum_str, file_size) = if let (Some(data), Some(hash)) = (contents, md5sum) {
+            // Use provided data and hash
+            (data.to_vec(), hash.to_string(), data.len())
         } else {
-            capture_date = exif::DateTime::from_ascii(b"2000:01:01 00:00:00").unwrap();
-        }
-        let capture_date_str = format!(
-            "{:0>4}-{:0>2}-{:0>2}T{:0>2}:{:0>2}:{:0>2}.{:0>3}Z",
-            capture_date.year,
-            capture_date.month,
-            capture_date.day,
-            capture_date.hour,
-            capture_date.minute,
-            capture_date.second,
-            capture_date.nanosecond.or_else(|| Some(0)).unwrap()
-        );
-        // debug!("Capture date is {}", capture_date_str);
-        let mut contents_vec: Vec<u8> = Vec::with_capacity(attr.len() as usize);
-        // Now get contents
-        let mut file = File::open(pic_path).unwrap();
-        let _ = file.read_to_end(&mut contents_vec);
-        // Finally, get hash
-        let md5sum = md5::compute(&contents_vec);
+            // Read file and compute hash
+            let attr = fs::metadata(pic_path).unwrap();
+            let mut contents_vec: Vec<u8> = Vec::with_capacity(attr.len() as usize);
+            let mut file = File::open(pic_path).unwrap();
+            let _ = file.read_to_end(&mut contents_vec);
+            let computed_md5 = md5::compute(&contents_vec);
+            (contents_vec, format!("{:x}", computed_md5), attr.len() as usize)
+        };
+
+        // Try to get capture date from EXIF data, or fall back to file creation time
+        let capture_date_str = {
+            let mut date_from_exif: Option<exif::DateTime> = None;
+
+            // Try to read EXIF data
+            let mut contents_cursor = std::io::Cursor::new(&contents_vec);
+            let exif_reader = exif::Reader::new();
+            if let Ok(exif_data) = exif_reader.read_from_container(&mut contents_cursor) {
+                // Try DateTimeDigitized first (when the photo was taken)
+                if let Some(field) = exif_data.get_field(Tag::DateTimeDigitized, exif::In::PRIMARY) {
+                    if let Value::Ascii(ref vec) = field.value {
+                        if !vec.is_empty() {
+                            if let Ok(dt) = exif::DateTime::from_ascii(&vec[0]) {
+                                date_from_exif = Some(dt);
+                            }
+                        }
+                    }
+                }
+
+                // Fall back to DateTimeOriginal if DateTimeDigitized not found
+                if date_from_exif.is_none() {
+                    if let Some(field) = exif_data.get_field(Tag::DateTimeOriginal, exif::In::PRIMARY) {
+                        if let Value::Ascii(ref vec) = field.value {
+                            if !vec.is_empty() {
+                                if let Ok(dt) = exif::DateTime::from_ascii(&vec[0]) {
+                                    date_from_exif = Some(dt);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fall back to DateTime if neither DateTimeDigitized nor DateTimeOriginal found
+                if date_from_exif.is_none() {
+                    if let Some(field) = exif_data.get_field(Tag::DateTime, exif::In::PRIMARY) {
+                        if let Value::Ascii(ref vec) = field.value {
+                            if !vec.is_empty() {
+                                if let Ok(dt) = exif::DateTime::from_ascii(&vec[0]) {
+                                    date_from_exif = Some(dt);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we have EXIF date, use it
+            if let Some(exif_dt) = date_from_exif {
+                format!(
+                    "{:0>4}-{:0>2}-{:0>2}T{:0>2}:{:0>2}:{:0>2}.{:0>3}Z",
+                    exif_dt.year,
+                    exif_dt.month,
+                    exif_dt.day,
+                    exif_dt.hour,
+                    exif_dt.minute,
+                    exif_dt.second,
+                    exif_dt.nanosecond.unwrap_or(0)
+                )
+            } else {
+                // No EXIF data, check file creation/modification time
+                let metadata = fs::metadata(pic_path).map_err(|e| e.to_string())?;
+
+                // Get file creation or modification time
+                let file_time = metadata.created()
+                    .or_else(|_| metadata.modified())
+                    .map_err(|e| format!("Could not get file time: {}", e))?;
+
+                // Check if file is more than 10 minutes old
+                let now = SystemTime::now();
+                let ten_minutes = std::time::Duration::from_secs(10 * 60);
+
+                if let Ok(duration_since_file) = now.duration_since(file_time) {
+                    if duration_since_file > ten_minutes {
+                        // File is old enough, use its creation/modification time
+                        let datetime: DateTime<Utc> = file_time.into();
+                        datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+                    } else {
+                        // File is too recent, return error
+                        return Err(format!(
+                            "No EXIF data found and file is too recent (created/modified less than 10 minutes ago). \
+                            Cannot determine capture date for: {}",
+                            pic_path.display()
+                        ));
+                    }
+                } else {
+                    // File time is in the future somehow, use it anyway
+                    let datetime: DateTime<Utc> = file_time.into();
+                    datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+                }
+            }
+        };
 
         let parent_node = match self.dry_run {
             false => &self.web_dir_node.as_ref().unwrap().id,
@@ -665,7 +704,7 @@ impl AmznPhoto {
             format!(
                 "https://content-{}.drive.amazonaws.com/v2/upload?conflictResolution=RENAME&fileSize={}&name={}&parentNodeId={}&contentDate={}",
                 self.conf.zone,
-                &attr.len().to_string(),
+                file_size,
                 pic_path.file_name().unwrap().to_str().unwrap(),
                 parent_node,
                 &capture_date_str
@@ -674,33 +713,16 @@ impl AmznPhoto {
         )
         .expect("Can't parse the upload URL");
 
-        let mut headers = HeaderMap::new();
-        headers.append(
+        let mut headers = self.build_common_headers();
+        headers.insert(
             "Content-Type",
             "application/x-www-form-urlencoded".parse().unwrap(),
         );
-        headers.append(
+        headers.insert(
             "Accept",
             "application/json, text/plain, */*".parse().unwrap(),
         );
-        headers.append("User-Agent", self.conf.user_agent.parse().unwrap());
-        headers.append("x-amzn-file-md5", format!("{:x}", md5sum).parse().unwrap());
-        headers.append(
-            "Cookie",
-            format!(
-                "session-id={}; x-acb{}={}; at-acb{}={}; ubid-acb{}={}",
-                self.conf.session_id,
-                self.conf.country,
-                self.conf.cookie_x_acb,
-                self.conf.country,
-                self.conf.cookie_at_acb,
-                self.conf.country,
-                self.conf.cookie_ubid_acb
-            )
-            .parse()
-            .unwrap(),
-        );
-        headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
+        headers.insert("x-amzn-file-md5", md5sum_str.parse().unwrap());
 
         // Return early
         if self.dry_run {
@@ -721,9 +743,22 @@ impl AmznPhoto {
 
         // Check the HTTP status
         if response.status().is_success() {
-            let body = match response.json::<ResponseUpload>().await {
+            // Clone response to read body twice if needed
+            let response_text = match response.text().await {
+                Ok(t) => t,
+                Err(e) => return Err(format!("Failed to read response body: {}", e)),
+            };
+
+            debug!("Upload response (first 500 chars): {}", &response_text.chars().take(500).collect::<String>());
+
+            // Try to deserialize from the text
+            let body: ResponseUpload = match serde_json::from_str(&response_text) {
                 Ok(v) => v,
-                Err(e) => return Err(e.to_string()),
+                Err(e) => {
+                    error!("Failed to parse upload response as JSON: {}", e);
+                    error!("Response body: {}", response_text);
+                    return Err(format!("JSON parse error: {}", e));
+                }
             };
             Ok(body.id)
         } else {
@@ -778,32 +813,16 @@ impl AmznPhoto {
         )
         .expect("Can't parse the add to album URL");
 
-        let mut headers = HeaderMap::new();
-        headers.append(
+        let mut headers = self.build_common_headers();
+        // Override Content-Type for this specific request
+        headers.insert(
             "Content-Type",
             "application/x-www-form-urlencoded".parse().unwrap(),
         );
-        headers.append(
+        headers.insert(
             "Accept",
             "application/json, text/plain, */*".parse().unwrap(),
         );
-        headers.append("User-Agent", self.conf.user_agent.parse().unwrap());
-        headers.append(
-            "Cookie",
-            format!(
-                "session-id={}; x-acb{}={}; at-acb{}={}; ubid-acb{}={}",
-                self.conf.session_id,
-                self.conf.country,
-                self.conf.cookie_x_acb,
-                self.conf.country,
-                self.conf.cookie_at_acb,
-                self.conf.country,
-                self.conf.cookie_ubid_acb
-            )
-            .parse()
-            .unwrap(),
-        );
-        headers.append("x-amzn-SessionId", self.conf.session_id.parse().unwrap());
 
         let payload = QueryNodeModify {
             op: "add".to_string(),
