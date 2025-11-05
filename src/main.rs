@@ -6,13 +6,15 @@ use config::Config;
 
 use clap::Parser;
 use env_logger::{Builder, Target};
+use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info};
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, BufWriter, Read, Write}, path::Path,
+    io::{self, BufRead, BufReader, BufWriter, Read, Write}, path::Path, sync::Arc,
 };
+use tokio::sync::{Mutex, Semaphore};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -22,9 +24,9 @@ struct Args {
     #[arg(long)]
     album_name: Option<String>,
 
-    /// The input directory to process
+    /// Input path(s) to process - can be a file or directory. Can be specified multiple times.
     #[arg(long)]
-    input: String,
+    input: Vec<String>,
 
     /// Enable verbose mode
     #[arg(short, long, action = clap::ArgAction::SetTrue)]
@@ -67,7 +69,7 @@ async fn main() -> Result<(), io::Error> {
     builder.init();
 
     let mut conf = Config::load()?;
-    let mut uploader = AmznPhoto::new(&mut conf, args.dry_run);
+    let uploader = AmznPhoto::new(&mut conf, args.dry_run);
     let is_albumless: bool = args.album_name.is_none();
 
     if is_albumless {
@@ -135,29 +137,103 @@ async fn main() -> Result<(), io::Error> {
         .append(true)
         .open(default_path)
         .unwrap();
-    let mut catalog_writer: BufWriter<File> = BufWriter::new(catalog_file);
+    let catalog_writer: BufWriter<File> = BufWriter::new(catalog_file);
 
     info!("Uploading pictures...");
-    let entries: Vec<_> = WalkDir::new(&args.input)
-        .into_iter()
-        .filter(|s| {
-            s.as_ref().is_ok_and(|si| {
-                si.path()
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("jpg"))
-            })
-        })
-        .collect();
+
+    // Validate and collect entries from all input paths
+    if args.input.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "At least one --input path must be specified",
+        ));
+    }
+
+    let mut entries: Vec<walkdir::DirEntry> = Vec::new();
+
+    for input_path in &args.input {
+        // Expand tilde in path
+        let expanded_path = if input_path.starts_with("~") {
+            if let Some(home) = dirs::home_dir() {
+                home.join(input_path.strip_prefix("~/").unwrap_or(&input_path[2..]))
+            } else {
+                Path::new(input_path).to_path_buf()
+            }
+        } else {
+            Path::new(input_path).to_path_buf()
+        };
+        let path = expanded_path.as_path();
+
+        if !path.exists() {
+            error!("Path does not exist: {}", input_path);
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Path not found: {}", input_path),
+            ));
+        }
+
+        if path.is_file() {
+            // Single file - check if it's a supported image format
+            let is_supported = path.extension().is_some_and(|e| {
+                let ext = e.to_string_lossy().to_lowercase();
+                ext == "jpg" || ext == "jpeg" || ext == "png"
+            });
+
+            if is_supported {
+                // Create a synthetic DirEntry for the file
+                // We need to walk the parent directory and filter for this specific file
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                let file_name = path.file_name().unwrap();
+
+                for entry in WalkDir::new(parent).max_depth(1).into_iter().filter_map(Result::ok) {
+                    if entry.file_name() == file_name {
+                        entries.push(entry);
+                        break;
+                    }
+                }
+            } else {
+                error!("File is not a supported image format (jpg/png): {}", input_path);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("File is not a supported image format (jpg/png): {}", input_path),
+                ));
+            }
+        } else if path.is_dir() {
+            // Directory - walk and collect all supported image files
+            let dir_entries: Vec<_> = WalkDir::new(path)
+                .into_iter()
+                .filter(|s| {
+                    s.as_ref().is_ok_and(|si| {
+                        si.path().extension().is_some_and(|e| {
+                            let ext = e.to_string_lossy().to_lowercase();
+                            ext == "jpg" || ext == "jpeg" || ext == "png"
+                        })
+                    })
+                })
+                .filter_map(Result::ok)
+                .collect();
+
+            entries.extend(dir_entries);
+        }
+    }
+
+    if entries.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No supported image files (jpg/png) found in the specified input path(s)",
+        ));
+    }
     let progress_bar = ProgressBar::new(entries.len() as u64);
     progress_bar
         .set_style(ProgressStyle::with_template("{bar} {pos:>7}/{len:7} {eta_precise}").unwrap());
 
+    // Prepare files for upload with deduplication
+    let mut files_to_upload = Vec::new();
     for entry in entries {
-        let dir_entry = entry.unwrap();
-        let path = dir_entry.path();
+        let path = entry.path().to_path_buf();
 
         // Check for prior processing
-        let attr = match fs::metadata(path) {
+        let attr = match fs::metadata(&path) {
             Ok(v) => v,
             Err(e) => {
                 error!("Cannot open {} ({}), skipping ", path.to_string_lossy(), e.kind());
@@ -167,16 +243,19 @@ async fn main() -> Result<(), io::Error> {
         };
         let mut contents_vec: Vec<u8> = Vec::with_capacity(attr.len() as usize);
         // Now get contents
-        let mut file = File::open(path).unwrap();
+        let mut file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Cannot open {} ({}), skipping ", path.to_string_lossy(), e.kind());
+                progress_bar.inc(1);
+                continue;
+            }
+        };
         let _ = file.read_to_end(&mut contents_vec);
         // Finally, get hash
         let md5sum = md5::compute(&contents_vec);
         let md5sum_str = format!("{:x}", md5sum);
         if catalog.contains_key(&md5sum_str) {
-            // debug!(
-            //     "Skipping already processed entry {}",
-            //     path.to_str().unwrap()
-            // );
             uploaded_ids.push(format!(
                 "{}:{}",
                 upload_album_owner_id,
@@ -186,22 +265,64 @@ async fn main() -> Result<(), io::Error> {
             continue;
         }
 
-        debug!("Uploading {}", path.as_os_str().to_str().unwrap());
-        let upload_data = uploader.upload_picture(path).await;
-        match upload_data {
-            Ok(val) => {
-                debug!("Upload OK");
-                uploaded_ids.push(format!("{}:{}", upload_album_owner_id, val));
-                let _ = catalog_writer.write(format!("{};{}\n", md5sum_str, val).as_bytes());
-                catalog.insert(md5sum_str, val);
-            }
-            Err(conn_err) => {
-                error!("Photo not uploaded ({}), skipped", conn_err);
-            }
-        }
-        progress_bar.inc(1);
+        files_to_upload.push((path, contents_vec, md5sum_str));
     }
+
+    // Upload files concurrently with a semaphore to limit parallelism
+    const MAX_CONCURRENT_UPLOADS: usize = 6;
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
+    let uploader = Arc::new(Mutex::new(uploader));
+    let catalog_writer = Arc::new(Mutex::new(catalog_writer));
+    let uploaded_ids = Arc::new(Mutex::new(uploaded_ids));
+    let catalog = Arc::new(Mutex::new(catalog));
+    let progress_bar = Arc::new(progress_bar);
+    let upload_album_owner_id = Arc::new(upload_album_owner_id);
+
+    stream::iter(files_to_upload)
+        .for_each_concurrent(MAX_CONCURRENT_UPLOADS, |(path, contents_vec, md5sum_str)| {
+            let semaphore = semaphore.clone();
+            let uploader = uploader.clone();
+            let catalog_writer = catalog_writer.clone();
+            let uploaded_ids = uploaded_ids.clone();
+            let catalog = catalog.clone();
+            let progress_bar = progress_bar.clone();
+            let upload_album_owner_id = upload_album_owner_id.clone();
+
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
+
+                debug!("Uploading {}", path.as_os_str().to_str().unwrap());
+                let upload_data = {
+                    let mut uploader = uploader.lock().await;
+                    uploader.upload_picture(&path, Some(&contents_vec), Some(&md5sum_str)).await
+                };
+
+                match upload_data {
+                    Ok(val) => {
+                        debug!("Upload OK");
+                        let id_str = format!("{}:{}", *upload_album_owner_id, val);
+                        uploaded_ids.lock().await.push(id_str);
+
+                        let log_line = format!("{};{}\n", md5sum_str, val);
+                        let _ = catalog_writer.lock().await.write(log_line.as_bytes());
+                        catalog.lock().await.insert(md5sum_str, val);
+                    }
+                    Err(conn_err) => {
+                        error!("Photo not uploaded ({}), skipped", conn_err);
+                    }
+                }
+                progress_bar.inc(1);
+            }
+        })
+        .await;
+
     progress_bar.finish_with_message("Done!");
+
+    // Unwrap Arc wrappers
+    let uploaded_ids = Arc::try_unwrap(uploaded_ids).unwrap().into_inner();
+    let uploader = Arc::try_unwrap(uploader).unwrap().into_inner();
+    let mut catalog_writer = Arc::try_unwrap(catalog_writer).unwrap().into_inner();
+
     // debug!("Uploaded {:?}", uploaded_ids);
 
     if !is_albumless {
