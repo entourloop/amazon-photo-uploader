@@ -117,12 +117,18 @@ async fn main() -> Result<(), io::Error> {
     }
 
     // Create an upload logger and read it for prior uploads
-    let default_path = Path::new("/tmp/uploader_amazon_photos.log");
+    let catalog_path = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("amzn_photos_uploader")
+        .join("upload_catalog.log");
+    if let Some(parent) = catalog_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let catalog_file = OpenOptions::new()
         .create(true)
         .read(true)
         .append(true)
-        .open(default_path)
+        .open(&catalog_path)
         .unwrap();
     let mut catalog: HashMap<String, String> = HashMap::new();
     let reader = BufReader::new(catalog_file);
@@ -135,7 +141,7 @@ async fn main() -> Result<(), io::Error> {
         .create(true)
         .read(true)
         .append(true)
-        .open(default_path)
+        .open(&catalog_path)
         .unwrap();
     let catalog_writer: BufWriter<File> = BufWriter::new(catalog_file);
 

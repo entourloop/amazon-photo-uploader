@@ -5,6 +5,16 @@ This tool, written in Rust, implements enough of the Amazon Photos API to perfor
 2. Upload the contents of a directory to an Amazon Photos instance, note down all the pictures' IDs.
 3. Add all these pictures to the album.
 
+## Building
+
+Requires the [Rust toolchain](https://rustup.rs/). Run from the project root:
+
+```bash
+cargo build --release
+```
+
+The binary will be placed at `target/release/amazon-photo-uploader` (or `target\release\amazon-photo-uploader.exe` on Windows).
+
 ## Configuration
 
 ### Initial Setup
@@ -20,7 +30,12 @@ To create your configuration file for the first time, use the `config_setup.py` 
 4. Copy the entire cookie string
 5. Run the setup script:
    ```bash
+   # macOS / Linux
    python3 config_setup.py 'session-id=123; x-acbfr=abc; ...'
+   ```
+   ```powershell
+   # Windows
+   python config_setup.py 'session-id=123; x-acbfr=abc; ...'
    ```
 
 The script will:
@@ -41,7 +56,12 @@ The configuration file is stored in:
 To update your cookies (e.g., after session expiration), use the `config_update.py` script:
 
 ```bash
+# macOS / Linux
 python3 config_update.py 'session-id=123; x-acbfr=abc; ...'
+```
+```powershell
+# Windows
+python config_update.py 'session-id=123; x-acbfr=abc; ...'
 ```
 
 This will update the cookie values while preserving your other settings (country, zone, user agent).
@@ -56,3 +76,13 @@ If photo uploads fail, you may need to update the `zone` parameter:
 4. Look for a request to: `https://content-XX.drive.amazonaws.com/v2/upload`
 5. Note the `XX` value (e.g., `eu`, `na`, `fe`)
 6. Edit your config file and update: `zone = "XX"`
+
+## Upload Catalog
+
+The tool keeps a local catalog of already-uploaded files (identified by MD5 hash) to avoid re-uploading on subsequent runs. The catalog is stored at:
+
+- **macOS**: `~/Library/Application Support/amzn_photos_uploader/upload_catalog.log`
+- **Linux**: `~/.local/share/amzn_photos_uploader/upload_catalog.log`
+- **Windows**: `%LOCALAPPDATA%\amzn_photos_uploader\upload_catalog.log`
+
+Delete this file to force a full re-upload.
