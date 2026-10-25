@@ -8,11 +8,11 @@ use clap::Parser;
 use env_logger::{Builder, Target};
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, BufWriter, Read, Write}, path::Path, sync::Arc,
+    io::{self, BufRead, BufReader, BufWriter, Read, Write}, path::Path, sync::Arc, time::Duration,
 };
 use tokio::sync::{Mutex, Semaphore};
 use walkdir::WalkDir;
@@ -283,6 +283,7 @@ async fn main() -> Result<(), io::Error> {
 
     // Upload files concurrently with a semaphore to limit parallelism
     const MAX_CONCURRENT_UPLOADS: usize = 6;
+    const MAX_UPLOAD_ATTEMPTS: u32 = 3;
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
     let uploader = Arc::new(Mutex::new(uploader));
     let catalog_writer = Arc::new(Mutex::new(catalog_writer));
@@ -305,9 +306,27 @@ async fn main() -> Result<(), io::Error> {
                 let _permit = semaphore.acquire().await.unwrap();
 
                 debug!("Uploading {}", path.as_os_str().to_str().unwrap());
-                let upload_data = {
-                    let mut uploader = uploader.lock().await;
-                    uploader.upload_picture(&path, Some(&contents_vec), Some(&md5sum_str)).await
+                let mut attempt = 1;
+                let upload_data = loop {
+                    let result = {
+                        let mut uploader = uploader.lock().await;
+                        uploader.upload_picture(&path, Some(&contents_vec), Some(&md5sum_str)).await
+                    };
+                    match result {
+                        Err(e) if attempt < MAX_UPLOAD_ATTEMPTS => {
+                            warn!(
+                                "Upload of {} failed ({}), retrying ({}/{})",
+                                path.to_string_lossy(),
+                                e,
+                                attempt,
+                                MAX_UPLOAD_ATTEMPTS - 1
+                            );
+                            // Sleep outside the uploader lock so other uploads keep going
+                            tokio::time::sleep(Duration::from_secs(2u64.pow(attempt))).await;
+                            attempt += 1;
+                        }
+                        result => break result,
+                    }
                 };
 
                 match upload_data {
