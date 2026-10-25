@@ -18,6 +18,8 @@ struct QueryNodeCreateNode {
     resource_version: String,
     #[serde(rename(serialize = "contentType"))]
     content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parents: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -389,16 +391,26 @@ impl AmznPhoto {
     }
 
     async fn create_album(&self, name: &str) -> Result<ResponseSearchData, reqwest::Error> {
+        self.create_node("VISUAL_COLLECTION", name, None).await
+    }
+
+    async fn create_node(
+        &self,
+        kind: &str,
+        name: &str,
+        parent_id: Option<&str>,
+    ) -> Result<ResponseSearchData, reqwest::Error> {
         let url =
             Url::parse(format!("https://www.amazon.{}/drive/v1/nodes", self.conf.country).as_str())
                 .expect("Can't parse the create album URL");
 
         let headers = self.build_common_headers();
         let payload = QueryNodeCreateNode {
-            kind: "VISUAL_COLLECTION".to_string(),
+            kind: kind.to_string(),
             name: name.to_string(),
             resource_version: "V2".to_string(),
             content_type: "JSON".to_string(),
+            parents: parent_id.map(|id| vec![id.to_string()]),
         };
 
         // Return early
@@ -499,27 +511,26 @@ impl AmznPhoto {
         // Note: These operations must be sequential because each depends on the previous result
         // The Pictures directory is needed to find its children (Web directory)
         let root_node = self.find_root_node().await;
-        let pictures_dir_searchdata = self
-            .find_children_nodes(
-                "kind:FOLDER+AND+status:(AVAILABLE*)+AND+name:\"Pictures\"",
-                &root_node.id,
-            )
-            .await
-            .unwrap();
-        let pictures_dir = pictures_dir_searchdata.data.get(0).unwrap();
-        let web_dir_node = self
-            .find_children_nodes(
-                "kind:FOLDER+AND+status:(AVAILABLE*)+AND+name:\"Web\"",
-                &pictures_dir.id,
-            )
-            .await
-            .unwrap()
-            .data
-            .get(0)
-            .unwrap()
-            .clone();
+        let pictures_dir = self.get_or_create_folder("Pictures", &root_node.id).await;
+        let web_dir_node = self.get_or_create_folder("Web", &pictures_dir.id).await;
         self.web_dir_node = Some(web_dir_node.clone());
         web_dir_node
+    }
+
+    /// Find a folder by name under a parent node, create it if it doesn't exist
+    async fn get_or_create_folder(&self, name: &str, parent_id: &str) -> ResponseSearchData {
+        let filter = format!(
+            "kind:FOLDER+AND+status:(AVAILABLE*)+AND+name:\"{}\"",
+            name
+        );
+        let existing = self.find_children_nodes(&filter, parent_id).await.unwrap();
+        if let Some(node) = existing.data.first() {
+            return node.clone();
+        }
+        debug!("Folder {} not found, creating it", name);
+        self.create_node("FOLDER", name, Some(parent_id))
+            .await
+            .unwrap()
     }
 
     async fn find_children_nodes(
