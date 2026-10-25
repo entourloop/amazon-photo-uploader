@@ -42,6 +42,14 @@ fn is_appledouble(path: &Path) -> bool {
     path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("._"))
 }
 
+/// Image formats the uploader accepts, matched case-insensitively on the extension
+fn is_supported_image(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        let ext = e.to_string_lossy().to_lowercase();
+        ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "heic"
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     let args = Args::parse();
@@ -185,11 +193,7 @@ async fn main() -> Result<(), io::Error> {
 
         if path.is_file() {
             // Single file - check if it's a supported image format
-            let is_supported = !is_appledouble(path)
-                && path.extension().is_some_and(|e| {
-                    let ext = e.to_string_lossy().to_lowercase();
-                    ext == "jpg" || ext == "jpeg" || ext == "png"
-                });
+            let is_supported = !is_appledouble(path) && is_supported_image(path);
 
             if is_supported {
                 // Create a synthetic DirEntry for the file
@@ -204,10 +208,10 @@ async fn main() -> Result<(), io::Error> {
                     }
                 }
             } else {
-                error!("File is not a supported image format (jpg/png): {}", input_path);
+                error!("File is not a supported image format (jpg/png/heic): {}", input_path);
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("File is not a supported image format (jpg/png): {}", input_path),
+                    format!("File is not a supported image format (jpg/png/heic): {}", input_path),
                 ));
             }
         } else if path.is_dir() {
@@ -216,11 +220,7 @@ async fn main() -> Result<(), io::Error> {
                 .into_iter()
                 .filter(|s| {
                     s.as_ref().is_ok_and(|si| {
-                        !is_appledouble(si.path())
-                            && si.path().extension().is_some_and(|e| {
-                                let ext = e.to_string_lossy().to_lowercase();
-                                ext == "jpg" || ext == "jpeg" || ext == "png"
-                            })
+                        !is_appledouble(si.path()) && is_supported_image(si.path())
                     })
                 })
                 .filter_map(Result::ok)
@@ -233,7 +233,7 @@ async fn main() -> Result<(), io::Error> {
     if entries.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "No supported image files (jpg/png) found in the specified input path(s)",
+            "No supported image files (jpg/png/heic) found in the specified input path(s)",
         ));
     }
     let progress_bar = ProgressBar::new(entries.len() as u64);
