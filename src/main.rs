@@ -37,6 +37,11 @@ struct Args {
     dry_run: bool,
 }
 
+/// macOS metadata files (e.g. `._IMG_0001.jpg`) that sit next to real files on external volumes
+fn is_appledouble(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("._"))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     let args = Args::parse();
@@ -180,10 +185,11 @@ async fn main() -> Result<(), io::Error> {
 
         if path.is_file() {
             // Single file - check if it's a supported image format
-            let is_supported = path.extension().is_some_and(|e| {
-                let ext = e.to_string_lossy().to_lowercase();
-                ext == "jpg" || ext == "jpeg" || ext == "png"
-            });
+            let is_supported = !is_appledouble(path)
+                && path.extension().is_some_and(|e| {
+                    let ext = e.to_string_lossy().to_lowercase();
+                    ext == "jpg" || ext == "jpeg" || ext == "png"
+                });
 
             if is_supported {
                 // Create a synthetic DirEntry for the file
@@ -210,10 +216,11 @@ async fn main() -> Result<(), io::Error> {
                 .into_iter()
                 .filter(|s| {
                     s.as_ref().is_ok_and(|si| {
-                        si.path().extension().is_some_and(|e| {
-                            let ext = e.to_string_lossy().to_lowercase();
-                            ext == "jpg" || ext == "jpeg" || ext == "png"
-                        })
+                        !is_appledouble(si.path())
+                            && si.path().extension().is_some_and(|e| {
+                                let ext = e.to_string_lossy().to_lowercase();
+                                ext == "jpg" || ext == "jpeg" || ext == "png"
+                            })
                     })
                 })
                 .filter_map(Result::ok)
