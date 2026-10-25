@@ -160,8 +160,8 @@ pub struct ResponseNodes {
 pub struct ResponseImageProperties {
     #[serde(default)]
     orientation: Option<String>,
-    #[serde(rename(deserialize = "resolutionUnit"))]
-    resolution_unit: String,
+    #[serde(default, rename(deserialize = "resolutionUnit"))]
+    resolution_unit: Option<String>,
     width: u32,
     height: u32,
 }
@@ -865,5 +865,17 @@ impl AmznPhoto {
             Self::check_auth_error(status_code);
             Err(response.error_for_status().err().unwrap())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_heic_upload_response_without_resolution_unit() {
+        let body = r#"{"id":"JQB4wXcARvKZI8Rn1BnmTA","name":"IMG_9815.HEIC","kind":"FILE","version":2,"modifiedDate":"2026-10-25T10:47:33.448Z","createdDate":"2026-10-25T10:47:32.587Z","parents":["cVzcpdscSjKH9YpaUeRQ2Q"],"parentMap":{"FOLDER":["cVzcpdscSjKH9YpaUeRQ2Q"]},"status":"AVAILABLE","restricted":false,"protectedFolder":false,"contentProperties":{"size":1625786,"version":1,"contentType":"image/heic","extension":"heic","md5":"55aa87f99560a945115f6f39e0653ec9","contentDate":"2023-02-10T14:04:47.000Z","image":{"make":"Apple","orientation":"6","width":3952,"height":2696},"contentSignatures":[]},"properties":{},"transforms":[],"keywords":[],"ownerId":"A17PS9B5HS164F","subKinds":[]}"#;
+        let resp: ResponseUpload = serde_json::from_str(body).unwrap();
+        assert_eq!(resp.id, "JQB4wXcARvKZI8Rn1BnmTA");
     }
 }
